@@ -1,0 +1,23 @@
+# Rust
+/target
+debug/
+release/
+
+# Cargo lock is committed for binaries, ignored for libraries; we're a
+# workspace with a binary, so it IS committed. (Left intentionally empty
+# of Cargo.lock.)
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Editors
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# testcontainers / local state
+*.log

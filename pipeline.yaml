@@ -1,0 +1,16 @@
+# cdcx pipeline plan (M3).
+# Applies to public.users; other tables pass through unchanged.
+
+tables:
+  public.users:
+    - type: select
+      columns: [id, name, email, balance, active]
+    - type: redact
+      columns: [email]
+    - type: cast
+      column: balance
+      to: float
+    - type: filter
+      op: eq
+      column: active
+      value: true
