@@ -120,6 +120,9 @@ pub enum Op {
     Update,
     /// Row deleted.
     Delete,
+    /// Table truncated: every row of the table is removed. Carries no
+    /// row images; consumers clear their per-table state instead.
+    Truncate,
 }
 
 impl fmt::Display for Op {
@@ -128,6 +131,7 @@ impl fmt::Display for Op {
             Op::Insert => f.write_str("INSERT"),
             Op::Update => f.write_str("UPDATE"),
             Op::Delete => f.write_str("DELETE"),
+            Op::Truncate => f.write_str("TRUNCATE"),
         }
     }
 }

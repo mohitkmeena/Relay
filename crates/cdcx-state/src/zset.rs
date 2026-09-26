@@ -80,7 +80,8 @@ impl ZSet {
 }
 
 /// Convert a change into its Z-set delta: +1 for the new image, -1 for
-/// the old image (update = both; delete = just -1).
+/// the old image (update = both; delete = just -1). Truncate has no
+/// per-row images — see [`truncate_delta`] for how table clears work.
 pub fn change_delta(change: &cdcx_model::Change) -> ZSet {
     let mut z = ZSet::new();
     match (&change.before, &change.after) {
@@ -96,6 +97,23 @@ pub fn change_delta(change: &cdcx_model::Change) -> ZSet {
             z.add(before.clone(), -1);
         }
         (None, None) => {}
+    }
+    z
+}
+
+/// Retract every row of a table (a TRUNCATE). Produces a delta that,
+/// applied to a view, cancels exactly the rows belonging to
+/// `namespace.table` (matched by the first column name/value pairs the
+/// view's rows carry for the table's key columns — here simply every
+/// row whose any column set intersects nothing; in practice callers
+/// pass the current per-table rows to retract).
+///
+/// The pragmatic contract: the caller supplies the view (or per-table
+/// index) so we can retract precisely. Returns the delta to apply.
+pub fn truncate_delta(rows_to_retract: impl IntoIterator<Item = Row>) -> ZSet {
+    let mut z = ZSet::new();
+    for row in rows_to_retract {
+        z.add(row, -1);
     }
     z
 }

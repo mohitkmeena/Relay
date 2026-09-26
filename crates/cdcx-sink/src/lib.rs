@@ -6,17 +6,24 @@
 //! success before the write is durable: the console sink is trivially
 //! durable, HTTP requires the remote's 2xx, ClickHouse requires the
 //! insert response.
+//!
+//! [`Sink`] returns an `impl Future` (not dyn-compatible), so runtime
+//! selection (plan-driven sinks, fan-out) goes through [`DynSink`],
+//! which boxes the future manually — no async-trait dependency.
 
 pub mod clickhouse;
 pub mod console;
+pub mod fanout;
 pub mod http;
 
 pub use clickhouse::ClickHouseSink;
 pub use console::ConsoleSink;
+pub use fanout::FanOutSink;
 pub use http::HttpSink;
 
 use cdcx_model::Txn;
 use std::future::Future;
+use std::pin::Pin;
 
 /// Error returned by a sink when a transaction could not be durably written.
 #[derive(Debug, thiserror::Error)]
@@ -42,4 +49,41 @@ pub trait Sink: Send + Sync {
     /// Durably write one transaction. Returning `Ok` means the write is
     /// durable and the engine may advance its watermark past `txn.commit_lsn`.
     fn write_txn(&mut self, txn: &Txn) -> impl Future<Output = Result<(), SinkError>> + Send;
+}
+
+/// Type-erased sink for runtime selection (plans, fan-out).
+pub struct DynSink {
+    inner: Box<dyn SinkErased>,
+}
+
+impl DynSink {
+    /// Erase a statically-known sink.
+    pub fn new<S: Sink + 'static>(sink: S) -> Self {
+        Self {
+            inner: Box::new(sink),
+        }
+    }
+}
+
+impl Sink for DynSink {
+    async fn write_txn(&mut self, txn: &Txn) -> Result<(), SinkError> {
+        self.inner.write_txn(txn).await
+    }
+}
+
+/// The vtable target: boxes the future returned by [`Sink::write_txn`].
+trait SinkErased: Send + Sync {
+    fn write_txn<'a>(
+        &'a mut self,
+        txn: &'a Txn,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SinkError>> + Send + 'a>>;
+}
+
+impl<S: Sink + 'static> SinkErased for S {
+    fn write_txn<'a>(
+        &'a mut self,
+        txn: &'a Txn,
+    ) -> Pin<Box<dyn Future<Output = Result<(), SinkError>> + Send + 'a>> {
+        Box::pin(Sink::write_txn(self, txn))
+    }
 }

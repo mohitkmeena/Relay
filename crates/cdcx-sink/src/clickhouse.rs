@@ -24,6 +24,8 @@ pub struct ClickHouseSink {
     client: reqwest::Client,
     /// ClickHouse database name.
     database: String,
+    /// Tables whose DDL has already been ensured (per process).
+    created: std::collections::HashSet<String>,
 }
 
 impl ClickHouseSink {
@@ -36,7 +38,63 @@ impl ClickHouseSink {
                 .build()
                 .map_err(|e| SinkError::Config(e.to_string()))?,
             database: database.into(),
+            created: std::collections::HashSet::new(),
         })
+    }
+
+    /// Map a cdcx value type to a ClickHouse column type.
+    fn ch_type(v: &Value) -> &'static str {
+        match v {
+            Value::Null | Value::Unchanged => "Nullable(String)",
+            Value::Bool(_) => "Bool",
+            Value::Int(_) => "Int64",
+            Value::Float(_) => "Float64",
+            Value::Text(_)
+            | Value::Numeric(_)
+            | Value::Timestamp(_)
+            | Value::Json(_)
+            | Value::Raw(_) => "String",
+        }
+    }
+
+    /// Ensure the target table exists (ReplacingMergeTree keyed by
+    /// `_version`). Best-effort: a race between two writers creating
+    /// the same table is tolerated (CREATE TABLE IF NOT EXISTS).
+    async fn ensure_table(&mut self, change: &Change) -> Result<(), SinkError> {
+        let table = format!("{}.{}", self.database, change.table);
+        if self.created.contains(&table) {
+            return Ok(());
+        }
+        let Some(image) = change.after.as_ref().or(change.before.as_ref()) else {
+            return Ok(());
+        };
+        // All value columns as String-ish except typed ones; key on the
+        // first column (the convention: key columns come first in the
+        // relation; refine when plans carry explicit keys).
+        let columns_ddl = image
+            .iter()
+            .map(|(name, value)| format!("\"{name}\" {}", Self::ch_type(value)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let key_col = image
+            .first()
+            .map(|(name, _)| name.clone())
+            .unwrap_or_else(|| "_key".into());
+        let ddl = format!(
+            "CREATE TABLE IF NOT EXISTS {table} ({columns_ddl}, \
+             _version UInt64, _is_deleted UInt8) \
+             ENGINE = ReplacingMergeTree(_version) ORDER BY (\"{key_col}\")"
+        );
+        let resp = self.exec(&ddl).await?;
+        if !resp.status().is_success() {
+            return Err(SinkError::Write(format!(
+                "clickhouse DDL failed: HTTP {} — {}",
+                resp.status(),
+                resp.text().await.unwrap_or_default()
+            )));
+        }
+        self.created.insert(table);
+        Ok(())
     }
 
     fn table_name(&self, change: &Change) -> String {
@@ -84,6 +142,19 @@ fn escape(s: &str) -> String {
 impl Sink for ClickHouseSink {
     async fn write_txn(&mut self, txn: &Txn) -> Result<(), SinkError> {
         for change in &txn.changes {
+            if change.op == cdcx_model::Op::Truncate {
+                // TRUNCATE the ClickHouse table to match the source.
+                let table = self.table_name(change);
+                let resp = self.exec(&format!("TRUNCATE TABLE {table}")).await?;
+                if !resp.status().is_success() {
+                    return Err(SinkError::Write(format!(
+                        "clickhouse truncate failed: HTTP {}",
+                        resp.status()
+                    )));
+                }
+                continue;
+            }
+            self.ensure_table(change).await?;
             let table = self.table_name(change);
             let image = change
                 .after

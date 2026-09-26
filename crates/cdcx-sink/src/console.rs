@@ -29,6 +29,9 @@ impl Sink for ConsoleSink {
                 "  {} {}.{} lsn={} #{}",
                 change.op, change.namespace, change.table, change.lsn, change.index_in_txn
             );
+            if change.op == cdcx_model::Op::Truncate {
+                continue;
+            }
             if let Some(before) = &change.before {
                 println!("    before: {before:?}");
             }

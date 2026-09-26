@@ -17,7 +17,10 @@ pub mod snapshot;
 
 pub use backfill::{backfill_then_stream, BackfillError};
 pub use decoder::{from_pg_text, DecodeError};
-pub use ops::{DriftDetector, DriftKind, HEARTBEAT_INTERVAL, SchemaDrift, SlotLag, slot_lag};
+pub use ops::{
+    emit_heartbeat, slot_lag, DriftDetector, DriftKind, SchemaDrift, SlotLag,
+    HEARTBEAT_INTERVAL,
+};
 pub use reader::{Reader, ReaderConfig, ReaderError};
 pub use snapshot::{
     SlotOptions, SnapshotError, SnapshotHandoff, copy_table, create_slot_with_snapshot,

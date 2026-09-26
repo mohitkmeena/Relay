@@ -15,11 +15,13 @@
 use cdcx_model::Txn;
 
 pub mod materialized;
+pub mod metrics;
 
 use cdcx_plan::Compiled;
 use cdcx_sink::Sink;
 use cdcx_state::{Checkpoint, FileCheckpoint};
 pub use materialized::{Aggregates, MaterializedView, ViewConfig};
+pub use metrics::{metrics, Metrics, MetricsHandle};
 
 use thiserror::Error;
 
@@ -73,6 +75,16 @@ impl Engine {
     pub fn with_view(mut self, view: MaterializedView) -> Self {
         self.view = Some(view);
         self
+    }
+
+    /// Restore a view's state from this engine's checkpoint (call
+    /// before [`Self::with_view`]). No-op when the checkpoint carries
+    /// no view state (first run).
+    pub fn restore_view(&self, view: &mut MaterializedView) {
+        let state = &self.checkpoint.get().operator_state;
+        if !state.is_null() {
+            view.restore(state);
+        }
     }
 
     /// Process one transaction: dedupe, transform, view-update, sink,

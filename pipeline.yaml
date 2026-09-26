@@ -1,5 +1,8 @@
-# cdcx pipeline plan (M3).
+# cdcx pipeline plan.
 # Applies to public.users; other tables pass through unchanged.
+
+keys:
+  public.users: [id]
 
 tables:
   public.users:
@@ -10,7 +13,18 @@ tables:
     - type: cast
       column: balance
       to: float
+    - type: map
+      column: double_balance
+      expr: "balance * 2"
     - type: filter
       op: eq
       column: active
       value: true
+
+# sink:
+#   type: fanout
+#   sinks:
+#     - type: console
+#     - type: clickhouse
+#       url: http://localhost:8123
+#       database: cdcx

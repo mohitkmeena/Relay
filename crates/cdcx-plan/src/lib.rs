@@ -15,7 +15,7 @@ pub mod filter;
 pub mod ops;
 
 pub use filter::FilterExpr;
-pub use ops::{CastType, OpSpec, Plan, PlanError, PlanOp, compile};
+pub use ops::{CastType, MapExpr, OpSpec, Plan, PlanError, PlanOp, SinkSpec, compile};
 
 use cdcx_model::Change;
 
@@ -25,6 +25,8 @@ pub struct Compiled {
     /// Operator lists keyed by "namespace.table". A missing key means
     /// "pass through unchanged".
     pub tables: std::collections::HashMap<String, Vec<PlanOp>>,
+    /// Per-table key columns, keyed by "namespace.table".
+    pub keys: std::collections::HashMap<String, Vec<String>>,
 }
 
 impl Compiled {
@@ -32,6 +34,7 @@ impl Compiled {
     pub fn compile(plan: &Plan) -> Result<Self, PlanError> {
         Ok(Self {
             tables: compile(plan)?,
+            keys: plan.keys.clone(),
         })
     }
 
@@ -43,5 +46,13 @@ impl Compiled {
                 op.apply(change);
             }
         }
+    }
+
+    /// The configured key columns for a table, or `None` to use the
+    /// full row image (the REPLICA IDENTITY FULL default).
+    pub fn key_columns(&self, namespace: &str, table: &str) -> Option<&[String]> {
+        self.keys
+            .get(&format!("{namespace}.{table}"))
+            .map(Vec::as_slice)
     }
 }

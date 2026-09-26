@@ -43,6 +43,39 @@ pub struct Plan {
     /// Per-table operator lists, keyed by "namespace.table".
     #[serde(default)]
     pub tables: HashMap<String, Vec<OpSpec>>,
+    /// Per-table primary key columns, keyed by "namespace.table".
+    /// Tables without an entry use every column of the row image as
+    /// the key (safe under REPLICA IDENTITY FULL).
+    #[serde(default)]
+    pub keys: HashMap<String, Vec<String>>,
+    /// Sink configuration. `None` = console.
+    #[serde(default)]
+    pub sink: Option<SinkSpec>,
+}
+
+/// Where to deliver changes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum SinkSpec {
+    /// Print to stdout (default).
+    Console,
+    /// POST to a webhook.
+    Http {
+        /// Webhook URL.
+        url: String,
+    },
+    /// Insert into ClickHouse.
+    Clickhouse {
+        /// HTTP endpoint, e.g. "http://localhost:8123".
+        url: String,
+        /// Target database.
+        database: String,
+    },
+    /// Deliver to every listed sink; all must confirm.
+    Fanout {
+        /// Inner sinks.
+        sinks: Vec<SinkSpec>,
+    },
 }
 
 /// One operator as written in YAML.
@@ -77,6 +110,15 @@ pub enum OpSpec {
         #[serde(flatten)]
         expr: FilterExpr,
     },
+    /// Compute a derived column. `expr` supports the same comparison
+    /// literals as filters plus `"left"`/`"right"` references to
+    /// columns and `"left+right"` arithmetic on ints.
+    Map {
+        /// New column name.
+        column: String,
+        /// Expression producing its value.
+        expr: String,
+    },
 }
 
 /// A compiled, ready-to-apply operator.
@@ -97,6 +139,15 @@ pub enum PlanOp {
     Redact(Vec<String>),
     /// Filter with enter/leave semantics.
     Filter(FilterExpr),
+    /// Compute a derived column from a small expression language:
+    /// column references, integer literals, and `+`/`-`/`*` between
+    /// int-typed operands. The result column overwrites on collision.
+    Map {
+        /// New column name.
+        column: String,
+        /// Parsed expression.
+        expr: MapExpr,
+    },
 }
 
 /// Target types for the cast operator.
@@ -138,6 +189,14 @@ pub fn compile(plan: &Plan) -> Result<HashMap<String, Vec<PlanOp>>, PlanError> {
                 },
                 OpSpec::Redact { columns } => PlanOp::Redact(columns.clone()),
                 OpSpec::Filter { expr } => PlanOp::Filter(expr.clone()),
+                OpSpec::Map { column, expr } => PlanOp::Map {
+                    column: column.clone(),
+                    expr: MapExpr::parse(expr)
+                        .ok_or_else(|| PlanError::UnknownColumn {
+                            column: expr.clone(),
+                            table: table.clone(),
+                        })?,
+                },
             });
         }
         tables.insert(table.clone(), ops);
@@ -223,7 +282,202 @@ impl PlanOp {
                     (false, true) | (true, true) => {}
                 }
             }
+            PlanOp::Map { column, expr } => {
+                if let Some(after) = change.after.as_mut() {
+                    if let Some(value) = expr.eval(after) {
+                        if let Some(existing) =
+                            after.iter_mut().find(|(name, _)| name == column)
+                        {
+                            existing.1 = value;
+                        } else {
+                            after.push((column.clone(), value));
+                        }
+                    }
+                }
+            }
         }
+    }
+}
+
+/// A tiny arithmetic expression for the map operator.
+///
+/// Grammar: `term ( (+|-) term )*`, `term = factor ( * factor )*`,
+/// `factor = <int literal> | <column name>`. Whitespace-insensitive.
+/// Evaluation is over `Value::Int` only; anything else yields `None`
+/// and the operator skips the column (no partial garbage).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MapExpr {
+    /// Integer literal.
+    Lit(i64),
+    /// Reference to a column.
+    Column(String),
+    /// `left + right`.
+    Add(Box<MapExpr>, Box<MapExpr>),
+    /// `left - right`.
+    Sub(Box<MapExpr>, Box<MapExpr>),
+    /// `left * right`.
+    Mul(Box<MapExpr>, Box<MapExpr>),
+}
+
+impl MapExpr {
+    /// Parse an expression string. `None` on syntax errors.
+    pub fn parse(src: &str) -> Option<MapExpr> {
+        let tokens: Vec<&str> = tokenize(src)?;
+        let mut pos = 0;
+        let expr = parse_add(&tokens, &mut pos)?;
+        if pos != tokens.len() {
+            return None; // trailing garbage
+        }
+        Some(expr)
+    }
+
+    /// Evaluate against a row; `None` if any operand is non-int.
+    pub fn eval(&self, row: &[(String, Value)]) -> Option<Value> {
+        Some(Value::Int(self.eval_int(row)?))
+    }
+
+    fn eval_int(&self, row: &[(String, Value)]) -> Option<i64> {
+        match self {
+            MapExpr::Lit(i) => Some(*i),
+            MapExpr::Column(name) => match row
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v)?
+            {
+                Value::Int(i) => Some(*i),
+                _ => None,
+            },
+            MapExpr::Add(a, b) => Some(a.eval_int(row)? + b.eval_int(row)?),
+            MapExpr::Sub(a, b) => Some(a.eval_int(row)? - b.eval_int(row)?),
+            MapExpr::Mul(a, b) => Some(a.eval_int(row)? * b.eval_int(row)?),
+        }
+    }
+}
+
+fn tokenize(src: &str) -> Option<Vec<&str>> {
+    let mut tokens = Vec::new();
+    let mut rest = src.trim();
+    while !rest.is_empty() {
+        let first = rest.as_bytes()[0];
+        if first == b' ' || first == b'\t' {
+            rest = &rest[1..];
+        } else if first == b'+' || first == b'-' || first == b'*' {
+            tokens.push(&rest[..1]);
+            rest = &rest[1..];
+        } else {
+            // Identifier or int literal: longest run of [A-Za-z0-9_]
+            let end = rest
+                .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+                .unwrap_or(rest.len());
+            if end == 0 {
+                return None; // unexpected character
+            }
+            tokens.push(&rest[..end]);
+            rest = &rest[end..];
+        }
+    }
+    Some(tokens)
+}
+
+fn parse_add(tokens: &[&str], pos: &mut usize) -> Option<MapExpr> {
+    let mut left = parse_mul(tokens, pos)?;
+    loop {
+        // Running out of tokens ends the expression, not a failure.
+        let Some(op) = tokens.get(*pos).copied() else {
+            return Some(left);
+        };
+        if op == "+" {
+            *pos += 1;
+            let right = parse_mul(tokens, pos)?;
+            left = MapExpr::Add(Box::new(left), Box::new(right));
+        } else if op == "-" {
+            *pos += 1;
+            let right = parse_mul(tokens, pos)?;
+            left = MapExpr::Sub(Box::new(left), Box::new(right));
+        } else {
+            return Some(left);
+        }
+    }
+}
+
+fn parse_mul(tokens: &[&str], pos: &mut usize) -> Option<MapExpr> {
+    let mut left = parse_factor(tokens, pos)?;
+    loop {
+        // Running out of tokens ends the expression, not a failure.
+        let Some(op) = tokens.get(*pos).copied() else {
+            return Some(left);
+        };
+        if op == "*" {
+            *pos += 1;
+            let right = parse_factor(tokens, pos)?;
+            left = MapExpr::Mul(Box::new(left), Box::new(right));
+        } else {
+            return Some(left);
+        }
+    }
+}
+
+fn parse_factor(tokens: &[&str], pos: &mut usize) -> Option<MapExpr> {
+    let token = tokens.get(*pos).copied()?;
+    *pos += 1;
+    if let Ok(i) = token.parse::<i64>() {
+        Some(MapExpr::Lit(i))
+    } else if token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        Some(MapExpr::Column(token.to_string()))
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn map_expr_parse_and_eval() {
+        let expr = MapExpr::parse("balance * 2 + 1").unwrap();
+        let row = vec![
+            ("id".to_string(), Value::Int(1)),
+            ("balance".to_string(), Value::Int(10)),
+        ];
+        assert_eq!(expr.eval(&row), Some(Value::Int(21)));
+
+        // Non-int operand: skipped, not garbage.
+        let row = vec![("balance".to_string(), Value::Text("x".into()))];
+        assert_eq!(expr.eval(&row), None);
+
+        // Trailing garbage rejected.
+        assert!(MapExpr::parse("a +").is_none());
+        assert!(MapExpr::parse("a $ b").is_none());
+    }
+
+    #[test]
+    fn map_operator_writes_column() {
+        let op = PlanOp::Map {
+            column: "double_balance".into(),
+            expr: MapExpr::parse("balance * 2").unwrap(),
+        };
+        let mut change = Change {
+            namespace: "public".into(),
+            table: "users".into(),
+            op: Op::Insert,
+            after: Some(vec![
+                ("id".to_string(), Value::Int(1)),
+                ("balance".to_string(), Value::Int(5)),
+            ]),
+            before: None,
+            lsn: 1,
+            index_in_txn: 0,
+        };
+        op.apply(&mut change);
+        let after = change.after.unwrap();
+        assert_eq!(
+            after.iter().find(|(n, _)| n == "double_balance").map(|(_, v)| v.clone()),
+            Some(Value::Int(10))
+        );
     }
 }
 

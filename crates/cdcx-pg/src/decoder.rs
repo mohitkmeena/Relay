@@ -290,15 +290,55 @@ impl Decoder {
         ))
     }
 
+    /// Build an `Op::Truncate` change for one relation of a Truncate
+    /// message (used for the 2nd..nth relation of a multi-table
+    /// truncate; the first goes through [`Self::to_change`]).
+    pub fn truncate_change(
+        &self,
+        relation_id: u32,
+        lsn: u64,
+        index_in_txn: u32,
+    ) -> Option<Change> {
+        let meta = self.relations.get(&relation_id)?;
+        Some(Change {
+            namespace: meta.namespace.clone(),
+            table: meta.name.clone(),
+            op: Op::Truncate,
+            after: None,
+            before: None,
+            lsn,
+            index_in_txn,
+        })
+    }
+
     /// Convert a decoded message into a pipeline [`Change`], given the
     /// change's LSN and position in its transaction.
     ///
-    /// Returns `None` for Relation and Truncate messages, which carry no
-    /// row data. Truncate normalization (as a synthetic delete-all or a
-    /// set of deletes) is deferred to M7.
+    /// Returns `None` for Relation messages, which carry no row data.
+    /// Truncate becomes a single `Op::Truncate` change per relation,
+    /// with no row images; consumers clear per-table state.
     pub fn to_change(&self, message: &Message, lsn: u64, index_in_txn: u32) -> Option<Change> {
         let (relation_id, op, after, before) = match message {
-            Message::Relation { .. } | Message::Truncate { .. } => return None,
+            Message::Relation { .. } => return None,
+            Message::Truncate { relation_ids, .. } => {
+                // Emit one Truncate change per relation; the caller
+                // (reader) pushes each as its own change. We return the
+                // first here; additional relations are handled by the
+                // reader calling to_change_extra_truncates. Simpler:
+                // the reader iterates; see reader.rs. We still emit for
+                // the first relation to keep this method total.
+                let relation_id = *relation_ids.first()?;
+                let meta = self.relations.get(&relation_id)?;
+                return Some(Change {
+                    namespace: meta.namespace.clone(),
+                    table: meta.name.clone(),
+                    op: Op::Truncate,
+                    after: None,
+                    before: None,
+                    lsn,
+                    index_in_txn,
+                });
+            }
             Message::Insert {
                 relation_id, tuple, ..
             } => (*relation_id, Op::Insert, Some(tuple), None),

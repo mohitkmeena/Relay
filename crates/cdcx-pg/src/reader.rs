@@ -192,6 +192,23 @@ impl Reader {
                                 ) {
                                     buffer.changes.push(change);
                                 }
+                                // A Truncate message may cover several
+                                // relations; to_change emitted the
+                                // first, append one for each remaining.
+                                if let crate::decoder::Message::Truncate {
+                                    relation_ids, ..
+                                } = &message
+                                {
+                                    for relation_id in relation_ids.iter().skip(1) {
+                                        if let Some(change) = decoder.truncate_change(
+                                            *relation_id,
+                                            wal_start.as_u64(),
+                                            buffer.changes.len() as u32,
+                                        ) {
+                                            buffer.changes.push(change);
+                                        }
+                                    }
+                                }
                             }
                             Ok(None) => break,
                             Err(e) => return Err(e.into()),

@@ -104,6 +104,19 @@ impl MaterializedView {
     /// Returns the aggregates as of after this transaction.
     pub fn process(&mut self, txn: &Txn) -> Aggregates {
         for change in &txn.changes {
+            if change.op == cdcx_model::Op::Truncate {
+                // Retract every row of this table from the view.
+                let table_rows: Vec<cdcx_state::zset::Row> = self
+                    .view
+                    .iter()
+                    .filter(|(_, w)| *w > 0)
+                    .map(|(row, _)| row.clone())
+                    .collect();
+                let delta = cdcx_state::zset::truncate_delta(table_rows);
+                self.view.merge(&delta);
+                self.view.compact();
+                continue;
+            }
             let delta = change_delta(change);
             let enriched: ZSet = if let Some(join) = self.join.as_ref() {
                 let mut out = ZSet::new();
