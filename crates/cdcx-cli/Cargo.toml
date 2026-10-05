@@ -1,0 +1,30 @@
+[package]
+name = "cdcx"
+description = "Change data capture from PostgreSQL with incremental view maintenance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "cdcx"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+cdcx-model = { workspace = true }
+cdcx-pg = { workspace = true }
+cdcx-plan = { workspace = true }
+cdcx-engine = { workspace = true }
+cdcx-sink = { workspace = true }
+cdcx-state = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+futures = "0.3"
+tokio = { workspace = true }
+tokio-postgres = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

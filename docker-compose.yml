@@ -1,0 +1,49 @@
+version: "3.9"  # informational only on modern Docker; kept for older installs
+
+services:
+  postgres:
+    image: postgres:17
+    container_name: cdcx-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    command:
+      - postgres
+      - -c
+      - wal_level=logical
+      - -c
+      - max_wal_senders=10
+      - -c
+      - max_replication_slots=10
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: cdcx-clickhouse
+    environment:
+      CLICKHOUSE_USER: cdcx
+      CLICKHOUSE_PASSWORD: cdcx
+    ports:
+      - "8123:8123"   # HTTP interface (what the sink uses)
+      - "9000:9000"   # native protocol
+    volumes:
+      - chdata:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- 'http://localhost:8123/ping' | grep -q Ok"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+
+volumes:
+  pgdata:
+  chdata:

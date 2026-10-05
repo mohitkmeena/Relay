@@ -1,0 +1,21 @@
+[package]
+name = "cdcx-engine"
+description = "Pipeline runtime: source -> normalize -> plan -> sink, with ack watermark"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+cdcx-model = { workspace = true }
+cdcx-pg = { workspace = true }
+cdcx-plan = { workspace = true }
+cdcx-sink = { workspace = true }
+cdcx-state = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
